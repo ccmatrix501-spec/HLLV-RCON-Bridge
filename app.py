@@ -21,12 +21,16 @@ from hllrcon.exceptions import (
 )
 from hllrcon.responses import ForceMode
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
-# 0 = no artificial timeout in this bridge. The RCON library / operating system can
-# still report genuine network failures, but the bridge will not cancel a slow command.
-CONNECT_TIMEOUT = float(os.getenv("RCON_CONNECT_TIMEOUT", "0"))
-COMMAND_TIMEOUT = float(os.getenv("RCON_COMMAND_TIMEOUT", "0"))
+# Intentionally hard-disabled. Existing Railway variables such as
+# RCON_CONNECT_TIMEOUT/RCON_COMMAND_TIMEOUT are ignored so the bridge never cancels
+# a valid slow HLL:V operation due to our own timer.
+CONNECT_TIMEOUT = 0.0
+COMMAND_TIMEOUT = 0.0
+
+BROADCAST_DIVIDER = "========================"
+DEFAULT_BROADCAST_HEADER = "[ 1ST M.I. SERVER NOTICE ]"
 
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -112,6 +116,8 @@ def _client() -> HLLVRcon:
 
 
 async def _await_rcon(awaitable: Any, timeout: float = COMMAND_TIMEOUT) -> Any:
+    # Timeout support remains available internally, but our configured timeout is 0,
+    # which means no bridge-side cancellation.
     if timeout and timeout > 0:
         try:
             return await asyncio.wait_for(awaitable, timeout=timeout)
@@ -132,6 +138,42 @@ def _ok(**extra: Any) -> dict[str, Any]:
     return {"ok": True, **extra}
 
 
+def _make_broadcast_visible(message: str) -> str:
+    """Format broadcasts for maximum readability in HLL:V's existing notice box.
+
+    The game does not expose text-colour/font controls over RCON, so we make the text
+    itself stand out with short divider lines, a distinct header, and whitespace.
+    Position is untouched.
+    """
+    text = message.replace("\r", "").strip()
+    if not text:
+        return text
+
+    if text.startswith(BROADCAST_DIVIDER) and text.endswith(BROADCAST_DIVIDER):
+        return text
+
+    lines = text.split("\n")
+    first_nonempty = next((i for i, line in enumerate(lines) if line.strip()), None)
+
+    header = DEFAULT_BROADCAST_HEADER
+    body_lines = lines
+    if first_nonempty is not None:
+        candidate = lines[first_nonempty].strip()
+        if candidate.startswith("[") and candidate.endswith("]"):
+            header = candidate
+            body_lines = lines[first_nonempty + 1 :]
+
+    while body_lines and not body_lines[0].strip():
+        body_lines.pop(0)
+    while body_lines and not body_lines[-1].strip():
+        body_lines.pop()
+
+    body = "\n".join(body_lines).strip()
+    if body:
+        return f"{BROADCAST_DIVIDER}\n{header}\n{BROADCAST_DIVIDER}\n\n{body}\n\n{BROADCAST_DIVIDER}"
+    return f"{BROADCAST_DIVIDER}\n{header}\n{BROADCAST_DIVIDER}"
+
+
 @app.get("/")
 async def root() -> dict[str, Any]:
     return {
@@ -139,8 +181,8 @@ async def root() -> dict[str, Any]:
         "version": APP_VERSION,
         "game": "Hell Let Loose: Vietnam",
         "public": False,
-        "connect_timeout": CONNECT_TIMEOUT,
-        "command_timeout": COMMAND_TIMEOUT,
+        "connect_timeout": "disabled",
+        "command_timeout": "disabled",
     }
 
 
@@ -269,8 +311,9 @@ async def broadcast(request: Request) -> dict[str, Any]:
     message = str(body.get("message", "")).strip()
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
-    await _call(_client().broadcast(message))
-    return _ok()
+    visible_message = _make_broadcast_visible(message)
+    await _call(_client().broadcast(visible_message))
+    return _ok(formatted_message=visible_message)
 
 
 @app.post("/api/v2/players/{player_id}/message")

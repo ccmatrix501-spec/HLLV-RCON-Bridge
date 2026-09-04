@@ -21,9 +21,12 @@ from hllrcon.exceptions import (
 )
 from hllrcon.responses import ForceMode
 
-APP_VERSION = "0.1.0"
-CONNECT_TIMEOUT = float(os.getenv("RCON_CONNECT_TIMEOUT", "35"))
-COMMAND_TIMEOUT = float(os.getenv("RCON_COMMAND_TIMEOUT", "30"))
+APP_VERSION = "0.2.0"
+
+# 0 = no artificial timeout in this bridge. The RCON library / operating system can
+# still report genuine network failures, but the bridge will not cancel a slow command.
+CONNECT_TIMEOUT = float(os.getenv("RCON_CONNECT_TIMEOUT", "0"))
+COMMAND_TIMEOUT = float(os.getenv("RCON_COMMAND_TIMEOUT", "0"))
 
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -76,7 +79,7 @@ def _error_detail(exc: Exception) -> tuple[int, str]:
     if isinstance(exc, RconMessageError):
         return 502, f"Unexpected HLL:V RCON response: {exc}"
     if isinstance(exc, TimeoutError):
-        return 504, "HLL:V RCON command timed out."
+        return 504, "The underlying HLL:V RCON connection timed out."
     if isinstance(exc, OSError):
         return 502, f"Network error while talking to HLL:V RCON: {exc}"
     return 500, f"RCON bridge error: {exc}"
@@ -98,7 +101,7 @@ async def handle_rcon_error(_: Request, exc: Exception) -> JSONResponse:
 @app.exception_handler(asyncio.TimeoutError)
 async def handle_timeout(_: Request, exc: asyncio.TimeoutError) -> JSONResponse:
     status, detail = _error_detail(exc)
-    logger.warning("RCON request timed out")
+    logger.warning("Underlying RCON operation timed out")
     return JSONResponse(status_code=status, content={"error": detail})
 
 
@@ -108,11 +111,17 @@ def _client() -> HLLVRcon:
     return state.client
 
 
+async def _await_rcon(awaitable: Any, timeout: float = COMMAND_TIMEOUT) -> Any:
+    if timeout and timeout > 0:
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="HLL:V RCON command timed out") from exc
+    return await awaitable
+
+
 async def _call(awaitable: Any, timeout: float = COMMAND_TIMEOUT) -> Any:
-    try:
-        return await asyncio.wait_for(awaitable, timeout=timeout)
-    except asyncio.TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="HLL:V RCON command timed out") from exc
+    return await _await_rcon(awaitable, timeout)
 
 
 def _dump(value: Any) -> Any:
@@ -130,6 +139,8 @@ async def root() -> dict[str, Any]:
         "version": APP_VERSION,
         "game": "Hell Let Loose: Vietnam",
         "public": False,
+        "connect_timeout": CONNECT_TIMEOUT,
+        "command_timeout": COMMAND_TIMEOUT,
     }
 
 
@@ -183,8 +194,8 @@ async def connect(request: Request) -> dict[str, Any]:
     async with state.lock:
         candidate = HLLVRcon(host=host, port=port, password=password, logger=logger)
         try:
-            await asyncio.wait_for(candidate.connect(), timeout=CONNECT_TIMEOUT)
-            session = await asyncio.wait_for(candidate.get_server_session(), timeout=COMMAND_TIMEOUT)
+            await _await_rcon(candidate.connect(), CONNECT_TIMEOUT)
+            session = await _await_rcon(candidate.get_server_session(), COMMAND_TIMEOUT)
         except Exception:
             candidate.disconnect()
             raise

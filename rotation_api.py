@@ -12,18 +12,36 @@ logger = logging.getLogger("hllv-rcon-bridge.rotation")
 rotation_lock = asyncio.Lock()
 
 HLLV_ALLOWED_MAPS = (
+    "wdeva_warfare_day",
     "wdeva_offensivenva_day",
     "wdeva_offensiveus_day",
+    "wdeva_domination_day",
+    "wdeva_conquest_day",
+    "wdevb_warfare_day",
     "wdevb_offensivenva_day",
     "wdevb_offensiveus_day",
+    "wdevb_domination_day",
+    "wdevb_conquest_day",
+    "wdevc_warfare_day",
     "wdevc_offensivenva_day",
     "wdevc_offensiveus_day",
+    "wdevc_domination_day",
+    "wdevc_conquest_day",
+    "wdevd_warfare_day",
     "wdevd_offensivenva_day",
     "wdevd_offensiveus_day",
+    "wdevd_domination_day",
+    "wdevd_conquest_day",
+    "wdeve_warfare_day",
+    "wdeve_conquest_day",
     "wdeve_offensivenva_day",
     "wdeve_offensiveus_day",
+    "wdeve_domination_day",
+    "wdevf_warfare_day",
     "wdevf_offensivenva_day",
     "wdevf_offensiveus_day",
+    "wdevf_domination_day",
+    "wdevf_conquest_day",
 )
 HLLV_ALLOWED_MAP_SET = set(HLLV_ALLOWED_MAPS)
 
@@ -48,10 +66,16 @@ def _rotation_names(rotation: Any) -> list[str]:
 
 def _mode_for_map(map_name: str) -> str:
     name = map_name.lower()
+    if "_warfare_" in name:
+        return "warfare"
     if "_offensivenva_" in name:
         return "offensivenva"
     if "_offensiveus_" in name:
         return "offensiveus"
+    if "_domination_" in name:
+        return "domination"
+    if "_conquest_" in name:
+        return "conquest"
     return "other"
 
 
@@ -67,10 +91,32 @@ async def map_catalog() -> dict[str, Any]:
             for name in HLLV_ALLOWED_MAPS
         ],
         "game_modes": [
+            {"id": "warfare", "label": "Warfare"},
             {"id": "offensivenva", "label": "Offensive - NVA"},
             {"id": "offensiveus", "label": "Offensive - US"},
+            {"id": "domination", "label": "Domination"},
+            {"id": "conquest", "label": "Conquest"},
         ],
     }
+
+
+@app.post("/api/v2/map-change")
+async def change_map_from_catalog(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    map_name = str(body.get("map_name", "")).strip().lower()
+    if not map_name:
+        raise HTTPException(status_code=400, detail="map_name is required")
+    if map_name not in HLLV_ALLOWED_MAP_SET:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Map is not in the configured HLL:V map pool",
+                "map": map_name,
+                "allowed_maps": list(HLLV_ALLOWED_MAPS),
+            },
+        )
+    await _call(_client().change_map(map_name))
+    return _ok(map_name=map_name, game_mode=_mode_for_map(map_name))
 
 
 @app.get("/api/v2/map-shuffle")

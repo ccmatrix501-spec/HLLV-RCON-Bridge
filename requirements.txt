@@ -1,0 +1,3 @@
+fastapi==0.116.*
+uvicorn==0.35.*
+hllrcon==2.0.0.*

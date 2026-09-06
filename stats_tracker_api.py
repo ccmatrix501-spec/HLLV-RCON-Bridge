@@ -16,9 +16,10 @@ from message_everyone_api import app
 from app import _call, _client, state
 
 try:
-    from hllrcon.admin_logs import HLLVPlayerConnectAdminLog
+    from hllrcon.admin_logs import HLLVPlayerConnectAdminLog, HLLVPlayerKillAdminLog
 except ImportError:  # pragma: no cover - compatibility guard
     HLLVPlayerConnectAdminLog = ()  # type: ignore[assignment,misc]
+    HLLVPlayerKillAdminLog = ()  # type: ignore[assignment,misc]
 
 logger = logging.getLogger("hllv-rcon-bridge.stats")
 
@@ -34,6 +35,19 @@ REVIVE_RAW_RE = re.compile(
     r"^REVIVE:\s*(?P<name>.+?)\((?:Allies|Axis)/(?P<id>\d{17}|[\da-f]{32})\)",
     flags=re.IGNORECASE,
 )
+
+VEHICLE_DISPLAY_NAMES = {
+    "Gaz 63 (Supply)": "GAZ-63 Supply Truck",
+    "Gaz 63 (Transport)": "GAZ-63 Transport Truck",
+    "M35 (Supply)": "M35 Supply Truck",
+    "M35 (Transport)": "M35 Transport Truck",
+    "NVA Boat": "NVA Boat",
+    "T54": "T-54",
+    "M48Patton": "M48 Patton",
+    "US Boat": "US Boat",
+    "UH-1 Huey Supply": "UH-1 Huey Supply",
+    "UH-1 Huey Transport": "UH-1 Huey Transport",
+}
 
 
 class TrackerRuntime:
@@ -93,6 +107,24 @@ def _init_db() -> None:
                 seen_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS weapon_kills (
+                player_id TEXT NOT NULL,
+                weapon_id TEXT NOT NULL,
+                weapon_name TEXT NOT NULL,
+                kills INTEGER NOT NULL DEFAULT 0,
+                last_used TEXT NOT NULL,
+                PRIMARY KEY(player_id, weapon_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS vehicle_kills (
+                player_id TEXT NOT NULL,
+                vehicle_id TEXT NOT NULL,
+                vehicle_name TEXT NOT NULL,
+                kills INTEGER NOT NULL DEFAULT 0,
+                last_used TEXT NOT NULL,
+                PRIMARY KEY(player_id, vehicle_id)
+            );
+
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -100,12 +132,39 @@ def _init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_players_kills ON players(kills DESC);
             CREATE INDEX IF NOT EXISTS idx_processed_events_seen ON processed_events(seen_at);
+            CREATE INDEX IF NOT EXISTS idx_weapon_kills_player ON weapon_kills(player_id, kills DESC);
+            CREATE INDEX IF NOT EXISTS idx_vehicle_kills_player ON vehicle_kills(player_id, kills DESC);
             """
         )
         db.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES('tracking_started_at', ?)",
             (_iso(runtime.started_at),),
         )
+
+
+def _favorite_rows(player_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    with _connect_db() as db:
+        weapon = db.execute(
+            """
+            SELECT weapon_id AS id, weapon_name AS name, kills
+            FROM weapon_kills
+            WHERE player_id = ?
+            ORDER BY kills DESC, last_used DESC, weapon_name ASC
+            LIMIT 1
+            """,
+            (player_id,),
+        ).fetchone()
+        vehicle = db.execute(
+            """
+            SELECT vehicle_id AS id, vehicle_name AS name, kills
+            FROM vehicle_kills
+            WHERE player_id = ?
+            ORDER BY kills DESC, last_used DESC, vehicle_name ASC
+            LIMIT 1
+            """,
+            (player_id,),
+        ).fetchone()
+    return (dict(weapon) if weapon else None, dict(vehicle) if vehicle else None)
 
 
 def _player_row(player_id: str) -> dict[str, Any] | None:
@@ -115,7 +174,13 @@ def _player_row(player_id: str) -> dict[str, Any] | None:
             "FROM players WHERE player_id = ?",
             (player_id,),
         ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    result = dict(row)
+    favorite_weapon, favorite_vehicle = _favorite_rows(player_id)
+    result["favorite_weapon"] = favorite_weapon
+    result["favorite_vehicle"] = favorite_vehicle
+    return result
 
 
 def _upsert_player(player_id: str, player_name: str) -> None:
@@ -248,11 +313,99 @@ def _entry_is_connect(entry: Any) -> bool:
         return False
 
 
+def _entry_is_kill(entry: Any) -> bool:
+    try:
+        return bool(HLLVPlayerKillAdminLog) and isinstance(entry, HLLVPlayerKillAdminLog)
+    except TypeError:
+        return False
+
+
+def _friendly_weapon_and_vehicle(entry: Any) -> tuple[str, str, str | None, str | None]:
+    raw_weapon_id = str(getattr(entry, "weapon_id", "") or "UNKNOWN").strip() or "UNKNOWN"
+    weapon_name = raw_weapon_id
+    vehicle_id: str | None = None
+    vehicle_name: str | None = None
+
+    try:
+        weapon = entry.get_weapon()
+        weapon_name = str(getattr(weapon, "name", "") or raw_weapon_id).strip() or raw_weapon_id
+        raw_vehicle_id = getattr(weapon, "vehicle_id", None)
+        if raw_vehicle_id:
+            vehicle_id = str(raw_vehicle_id)
+            vehicle_name = VEHICLE_DISPLAY_NAMES.get(vehicle_id, vehicle_id)
+            try:
+                get_vehicle = getattr(weapon, "get_vehicle", None)
+                if callable(get_vehicle):
+                    vehicle = get_vehicle()
+                    if vehicle is not None:
+                        vehicle_name = str(getattr(vehicle, "name", "") or vehicle_name)
+            except Exception:
+                pass
+    except Exception:
+        # Unknown future weapon IDs still get tracked by their raw RCON ID.
+        bracket = re.search(r"\[([^\]]+)\]\s*$", raw_weapon_id)
+        if bracket:
+            candidate = bracket.group(1).strip()
+            if candidate in VEHICLE_DISPLAY_NAMES:
+                vehicle_id = candidate
+                vehicle_name = VEHICLE_DISPLAY_NAMES[candidate]
+
+    return raw_weapon_id, weapon_name, vehicle_id, vehicle_name
+
+
+def _record_kill_preference(entry: Any) -> None:
+    if not _entry_is_kill(entry):
+        return
+
+    player_id = str(getattr(entry, "instigator_id", "") or "").strip()
+    player_name = str(getattr(entry, "instigator_name", "") or player_id).strip()
+    if not player_id:
+        return
+
+    _upsert_player(player_id, player_name)
+    weapon_id, weapon_name, vehicle_id, vehicle_name = _friendly_weapon_and_vehicle(entry)
+    now = _iso()
+
+    with _connect_db() as db:
+        if vehicle_id:
+            db.execute(
+                """
+                INSERT INTO vehicle_kills(player_id, vehicle_id, vehicle_name, kills, last_used)
+                VALUES(?, ?, ?, 1, ?)
+                ON CONFLICT(player_id, vehicle_id) DO UPDATE SET
+                    vehicle_name = excluded.vehicle_name,
+                    kills = vehicle_kills.kills + 1,
+                    last_used = excluded.last_used
+                """,
+                (player_id, vehicle_id, vehicle_name or vehicle_id, now),
+            )
+        else:
+            db.execute(
+                """
+                INSERT INTO weapon_kills(player_id, weapon_id, weapon_name, kills, last_used)
+                VALUES(?, ?, ?, 1, ?)
+                ON CONFLICT(player_id, weapon_id) DO UPDATE SET
+                    weapon_name = excluded.weapon_name,
+                    kills = weapon_kills.kills + 1,
+                    last_used = excluded.last_used
+                """,
+                (player_id, weapon_id, weapon_name, now),
+            )
+
+
 def _entry_time(entry: Any) -> datetime | None:
     value = getattr(entry, "timestamp", None)
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     return None
+
+
+def _favorite_line(label: str, favorite: dict[str, Any] | None) -> str:
+    if not favorite:
+        return f"{label}: NOT ENOUGH DATA"
+    kills = int(favorite.get("kills", 0) or 0)
+    suffix = "KILL" if kills == 1 else "KILLS"
+    return f"{label}: {favorite.get('name', 'UNKNOWN')} ({kills} {suffix})"
 
 
 async def _send_stats_message(player_id: str, player_name: str) -> None:
@@ -269,6 +422,8 @@ async def _send_stats_message(player_id: str, player_name: str) -> None:
         f"KILLS: {row['kills']}\n"
         f"DEATHS: {row['deaths']}\n"
         f"REVIVES: {row['revives']}\n\n"
+        f"{_favorite_line('FAVOURITE WEAPON', row.get('favorite_weapon'))}\n"
+        f"{_favorite_line('FAVOURITE VEHICLE', row.get('favorite_vehicle'))}\n\n"
         "GOOD LUCK, TROOPER."
     )
     await _call(_client().message_player(player_id, message))
@@ -305,6 +460,8 @@ async def _process_admin_logs(current_players: dict[str, tuple[str, int, int]]) 
         revive = _revive_actor(entry)
         if revive:
             _record_revive(*revive)
+
+        _record_kill_preference(entry)
 
         if not _entry_is_connect(entry):
             continue
@@ -400,6 +557,8 @@ async def player_stats_status() -> dict[str, Any]:
         "log_window_seconds": LOG_WINDOW_SECONDS,
         "join_message": JOIN_MESSAGE_ENABLED,
         "tracked_players": total_players,
+        "favorite_weapon_basis": "enemy kills with non-vehicle weapons",
+        "favorite_vehicle_basis": "enemy kills with vehicle-associated weapons/roadkills",
         "last_poll_at": runtime.last_poll_at.isoformat() if runtime.last_poll_at else None,
         "last_error": runtime.last_error,
     }
@@ -416,7 +575,15 @@ async def player_stats(limit: int = Query(default=100, ge=1, le=1000)) -> dict[s
             "FROM players ORDER BY kills DESC, revives DESC, deaths ASC LIMIT ?",
             (limit,),
         ).fetchall()
-    return {"players": [dict(row) for row in rows]}
+
+    players: list[dict[str, Any]] = []
+    for raw_row in rows:
+        row = dict(raw_row)
+        favorite_weapon, favorite_vehicle = _favorite_rows(str(row["player_id"]))
+        row["favorite_weapon"] = favorite_weapon
+        row["favorite_vehicle"] = favorite_vehicle
+        players.append(row)
+    return {"players": players}
 
 
 @app.get("/api/v2/player-stats/{player_id}")

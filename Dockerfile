@@ -12,7 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY rotation_api.py .
 COPY message_everyone_api.py .
+COPY stats_tracker_api.py .
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn message_everyone_api:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "uvicorn stats_tracker_api:app --host 0.0.0.0 --port ${PORT:-8080}"]

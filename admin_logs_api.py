@@ -34,7 +34,6 @@ def _event_type(entry: Any) -> str:
         ("sendmessage", "CHAT"),
         ("receivemessage", "MESSAGE"),
         ("teamswitch", "TEAM SWITCH"),
-        ("enterradmincamera", "ADMIN CAMERA"),
         ("enteradmincamera", "ADMIN CAMERA"),
         ("leaveadmincamera", "ADMIN CAMERA"),
         ("playerkick", "KICK"),
@@ -57,7 +56,7 @@ def _event_type(entry: Any) -> str:
 
 def _serialize_entry(entry: Any) -> dict[str, Any]:
     # Calling model_dump() on the concrete entry preserves subclass-specific fields
-    # such as player_name, victim_name, weapon_id, channel, reason, etc.
+    # such as player_name, victim_name, weapon_id, channel, reason, chat message, etc.
     if hasattr(entry, "model_dump"):
         try:
             data = entry.model_dump(mode="json", exclude_none=True)
@@ -76,11 +75,11 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
     if timestamp is not None:
         data["timestamp"] = timestamp
 
-    # raw_message is deliberately marked exclude=True by hllrcon, but this is the
-    # most useful field for an admin-log viewer and for forward-compatible events.
+    # raw_message is deliberately marked exclude=True by hllrcon. Keep it in a
+    # separate field so parsed CHAT/MESSAGE events can retain their own `message`.
     raw = str(getattr(entry, "raw_message", "") or "").strip()
     data["type"] = _event_type(entry)
-    data["message"] = raw
+    data["raw_message"] = raw
     data["log_class"] = type(entry).__name__
     return data
 

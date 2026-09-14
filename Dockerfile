@@ -21,7 +21,8 @@ COPY leaderboard_api.py .
 COPY admin_request_api.py .
 COPY connection_keeper.py .
 COPY admin_support_api.py .
+COPY admin_support_entry.py .
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn admin_support_api:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "uvicorn admin_support_entry:app --host 0.0.0.0 --port ${PORT:-8080}"]

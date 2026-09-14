@@ -289,7 +289,11 @@ async def stop_leaderboard_commands() -> None:
         runtime.task = None
 
 
-@app.get("/api/v2/player-stats/leaderboard")
+# Keep leaderboard endpoints outside /player-stats/{player_id}. The tracker already
+# has a dynamic player_id route, and Starlette resolves routes in declaration order;
+# using /player-stats/leaderboard caused the word "leaderboard" to be treated as a
+# player ID and returned "No tracked stats for this player yet".
+@app.get("/api/v2/leaderboard")
 async def leaderboard(limit: int = Query(default=10, ge=1, le=100)) -> dict[str, Any]:
     board = _rankings(limit)
     return {
@@ -301,7 +305,7 @@ async def leaderboard(limit: int = Query(default=10, ge=1, le=100)) -> dict[str,
     }
 
 
-@app.get("/api/v2/player-stats/leaderboard/status")
+@app.get("/api/v2/leaderboard/status")
 async def leaderboard_status() -> dict[str, Any]:
     return {
         "enabled": LEADERBOARD_COMMANDS_ENABLED,

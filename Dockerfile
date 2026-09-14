@@ -18,7 +18,8 @@ COPY admin_logs_api.py .
 COPY voting_api.py .
 COPY stats_commands_api.py .
 COPY leaderboard_api.py .
+COPY admin_request_api.py .
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn leaderboard_api:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "uvicorn admin_request_api:app --host 0.0.0.0 --port ${PORT:-8080}"]

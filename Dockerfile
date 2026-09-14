@@ -16,7 +16,8 @@ COPY stats_tracker_api.py .
 COPY access_management_api.py .
 COPY admin_logs_api.py .
 COPY voting_api.py .
+COPY stats_commands_api.py .
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn voting_api:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "uvicorn stats_commands_api:app --host 0.0.0.0 --port ${PORT:-8080}"]

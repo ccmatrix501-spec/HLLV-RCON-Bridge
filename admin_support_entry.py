@@ -4,6 +4,7 @@ from fastapi import Request
 
 import admin_request_api as admin_api
 import admin_support_api as support
+import match_leaderboard_api  # Registers server-wide current match leaderboard command/routes.
 from admin_support_api import admin_support_action, app
 
 # Persist the support request before the Discord DM is sent so its buttons are

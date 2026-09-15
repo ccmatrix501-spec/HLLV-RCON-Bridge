@@ -18,6 +18,7 @@ COPY admin_logs_api.py .
 COPY voting_api.py .
 COPY stats_commands_api.py .
 COPY leaderboard_api.py .
+COPY match_leaderboard_api.py .
 COPY admin_request_api.py .
 COPY connection_keeper.py .
 COPY admin_support_api.py .

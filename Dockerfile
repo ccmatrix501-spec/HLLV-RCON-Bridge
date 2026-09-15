@@ -13,6 +13,7 @@ COPY app.py .
 COPY rotation_api.py .
 COPY message_everyone_api.py .
 COPY stats_tracker_api.py .
+COPY public_stats_api.py .
 COPY access_management_api.py .
 COPY admin_logs_api.py .
 COPY voting_api.py .

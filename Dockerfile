@@ -29,6 +29,7 @@ COPY player_labels_api.py .
 COPY rcon_pool_patch.py .
 COPY pool_policy.py .
 COPY pool_status_api.py .
+COPY bridge_resilience.py .
 
 EXPOSE 8080
 

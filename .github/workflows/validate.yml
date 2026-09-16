@@ -24,9 +24,32 @@ jobs:
           test -f rcon_pool_patch.py
           test -f pool_policy.py
           test -f pool_status_api.py
+          test -f revive_tracking_patch.py
           test -f bridge_resilience.py
           test -f connection_keeper.py
           test -f app.py
+      - name: Verify revive detector compatibility
+        env:
+          HLLV_RCON_AUTO_CONNECT: 'false'
+          PLAYER_STATS_DB_PATH: /tmp/hllv-ci-revive-detector.db
+        run: |
+          python - <<'PY'
+          from types import SimpleNamespace
+          import revive_tracking_patch as revives
+
+          cases = [
+              (SimpleNamespace(weapon_id='REVIVE', instigator_id='0123456789abcdef0123456789abcdef', instigator_name='Medic', raw_message=''), '0123456789abcdef0123456789abcdef'),
+              (SimpleNamespace(weapon_id='', raw_message='REVIVE: Medic(Allies/0123456789abcdef0123456789abcdef) -> Trooper(Allies/fedcba9876543210fedcba9876543210)'), '0123456789abcdef0123456789abcdef'),
+              (SimpleNamespace(weapon_id='', raw_message='Medic(Axis/0123456789abcdef0123456789abcdef) REVIVED Trooper(Axis/fedcba9876543210fedcba9876543210)'), '0123456789abcdef0123456789abcdef'),
+              (SimpleNamespace(weapon_id='', raw_message='Trooper was REVIVED BY Medic(Allies/0123456789abcdef0123456789abcdef)'), '0123456789abcdef0123456789abcdef'),
+          ]
+          for entry, expected in cases:
+              actor = revives._detect_revive_actor(entry)
+              assert actor and actor[0] == expected, (entry, actor)
+
+          assert revives._detect_revive_actor(SimpleNamespace(weapon_id='', raw_message='KILL: Player(Allies/0123456789abcdef0123456789abcdef)')) is None
+          print('Revive detector compatibility checks passed')
+          PY
       - name: Verify critical routes register
         env:
           HLLV_RCON_AUTO_CONNECT: 'false'
@@ -40,6 +63,7 @@ jobs:
               ('/api/v2/connection/status', 'GET'),
               ('/api/v2/connection/pool', 'GET'),
               ('/api/v2/resilience/status', 'GET'),
+              ('/api/v2/revive-tracking/status', 'GET'),
               ('/api/v2/players', 'GET'),
               ('/api/v2/logs', 'GET'),
               ('/api/v2/kick', 'POST'),
@@ -73,5 +97,6 @@ jobs:
           curl --fail --silent --show-error http://127.0.0.1:8080/api/v2/connection/status | grep -q '"connected":false'
           curl --fail --silent --show-error http://127.0.0.1:8080/api/v2/connection/pool | grep -q '"connected_connections":0'
           curl --fail --silent --show-error http://127.0.0.1:8080/api/v2/resilience/status | grep -q '"ok":true'
+          curl --fail --silent --show-error http://127.0.0.1:8080/api/v2/revive-tracking/status | grep -q '"ok":true'
       - name: Build production Docker image
         run: docker build --pull=false -t hllv-rcon-bridge-ci .

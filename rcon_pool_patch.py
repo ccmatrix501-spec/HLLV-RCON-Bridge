@@ -40,7 +40,10 @@ POOL_SIZE = _env_int("HLLV_RCON_POOL_SIZE", 3, 1, 5)
 CONNECT_TIMEOUT = _env_float("HLLV_RCON_POOL_CONNECT_TIMEOUT_SECONDS", 10.0, 3.0, 60.0)
 READ_TIMEOUT = _env_float("HLLV_RCON_READ_TIMEOUT_SECONDS", 22.0, 5.0, 120.0)
 WRITE_TIMEOUT = _env_float("HLLV_RCON_WRITE_TIMEOUT_SECONDS", 22.0, 5.0, 120.0)
+READ_QUEUE_TIMEOUT = _env_float("HLLV_RCON_READ_QUEUE_TIMEOUT_SECONDS", 4.0, 1.0, 30.0)
+WRITE_QUEUE_TIMEOUT = _env_float("HLLV_RCON_WRITE_QUEUE_TIMEOUT_SECONDS", 15.0, 2.0, 60.0)
 REPAIR_SECONDS = _env_float("HLLV_RCON_POOL_REPAIR_SECONDS", 8.0, 2.0, 120.0)
+MAX_FILL_BACKOFF = _env_float("HLLV_RCON_POOL_MAX_BACKOFF_SECONDS", 60.0, 10.0, 300.0)
 READ_RETRIES = _env_int("HLLV_RCON_READ_RETRIES", 1, 0, 3)
 IDLE_PROBE_SECONDS = _env_float("HLLV_RCON_IDLE_PROBE_SECONDS", 45.0, 15.0, 300.0)
 PROBE_TIMEOUT = _env_float("HLLV_RCON_PROBE_TIMEOUT_SECONDS", 6.0, 2.0, 30.0)
@@ -57,6 +60,10 @@ _TRANSIENT_ERRORS = (
 )
 
 
+class _PoolBusyError(RuntimeError):
+    """All suitable RCON lanes stayed busy beyond the bounded queue wait."""
+
+
 @dataclass
 class _PoolSlot:
     client: Any
@@ -68,6 +75,7 @@ class _PoolSlot:
     last_latency_ms: float = 0.0
     calls: int = 0
     failures: int = 0
+    queue_timeouts: int = 0
     last_error: str | None = None
 
     def connected(self) -> bool:
@@ -85,13 +93,12 @@ class _PoolSlot:
 class PooledHLLVRcon:
     """Drop-in HLLVRcon wrapper with isolated command and read lanes.
 
-    The first live slot is the command lane whenever possible. Additional slots
-    are used for read-heavy polling. Every socket has its own asyncio.Lock, so a
-    connection never receives overlapping RCON commands.
+    Slot 0 (or the first surviving slot) is the command lane. Additional slots
+    handle read-heavy polling. Every socket is serialized with its own lock.
 
-    Startup only waits for one valid RCON connection. Extra read lanes warm in
-    the background, which keeps Railway deploy/healthcheck startup fast even when
-    the game server is slow to accept additional sessions.
+    Startup waits only for one valid session and warms extra lanes in the
+    background. Queue waits are bounded separately from command execution, so
+    many browser tabs/features cannot create an indefinitely growing RCON backlog.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -105,7 +112,10 @@ class PooledHLLVRcon:
         self._last_pool_error: str | None = None
         self._total_calls = 0
         self._total_failures = 0
+        self._total_queue_timeouts = 0
         self._started_at = time.monotonic()
+        self._fill_backoff_seconds = REPAIR_SECONDS
+        self._next_fill_at = 0.0
 
         self.host = kwargs.get("host", args[0] if len(args) > 0 else None)
         self.port = kwargs.get("port", args[1] if len(args) > 1 else None)
@@ -149,12 +159,7 @@ class PooledHLLVRcon:
             except Exception:
                 pass
             raise
-        return _PoolSlot(
-            client=client,
-            index=index,
-            lock=asyncio.Lock(),
-            created_at=time.monotonic(),
-        )
+        return _PoolSlot(client=client, index=index, lock=asyncio.Lock(), created_at=time.monotonic())
 
     async def _ensure_first_connection(self) -> int:
         async with self._pool_lock:
@@ -170,6 +175,8 @@ class PooledHLLVRcon:
             slot = await self._connect_one(0)
             self._slots.append(slot)
             self._primary = slot
+            self._fill_backoff_seconds = REPAIR_SECONDS
+            self._next_fill_at = 0.0
             logger.info("Primary RCON connection ready for %s:%s", self.host, self.port)
             return 1
 
@@ -179,25 +186,34 @@ class PooledHLLVRcon:
                 if not slot.connected():
                     self._drop_slot(slot, slot.last_error or "RCON connection is no longer active")
 
+            healthy_count = len(self._healthy_slots())
+            if healthy_count and time.monotonic() < self._next_fill_at:
+                return healthy_count
+
             while not self._closed and len(self._healthy_slots()) < POOL_SIZE:
                 index = max((slot.index for slot in self._slots), default=-1) + 1
                 try:
                     slot = await self._connect_one(index)
                 except Exception as exc:
                     self._last_pool_error = str(exc)
+                    self._next_fill_at = time.monotonic() + self._fill_backoff_seconds
+                    self._fill_backoff_seconds = min(MAX_FILL_BACKOFF, max(REPAIR_SECONDS, self._fill_backoff_seconds * 2.0))
                     logger.warning(
-                        "Could not add RCON pool connection %s/%s to %s:%s: %s",
+                        "Could not add RCON pool connection %s/%s to %s:%s: %s; extra-lane retry in %.1fs",
                         len(self._healthy_slots()) + 1,
                         POOL_SIZE,
                         self.host,
                         self.port,
                         exc,
+                        max(0.0, self._next_fill_at - time.monotonic()),
                     )
                     break
 
                 self._slots.append(slot)
                 if self._primary is None:
                     self._primary = slot
+                self._fill_backoff_seconds = REPAIR_SECONDS
+                self._next_fill_at = 0.0
                 logger.info(
                     "RCON pool connection ready %s/%s for %s:%s",
                     len(self._healthy_slots()),
@@ -251,13 +267,17 @@ class PooledHLLVRcon:
             "busy_connections": sum(1 for slot in healthy if slot.lock.locked()),
             "read_timeout_seconds": READ_TIMEOUT,
             "write_timeout_seconds": WRITE_TIMEOUT,
+            "read_queue_timeout_seconds": READ_QUEUE_TIMEOUT,
+            "write_queue_timeout_seconds": WRITE_QUEUE_TIMEOUT,
             "connect_timeout_seconds": CONNECT_TIMEOUT,
             "repair_interval_seconds": REPAIR_SECONDS,
             "idle_probe_seconds": IDLE_PROBE_SECONDS,
             "read_retries": READ_RETRIES,
             "total_calls": self._total_calls,
             "total_failures": self._total_failures,
+            "total_queue_timeouts": self._total_queue_timeouts,
             "uptime_seconds": round(max(0.0, now - self._started_at), 1),
+            "next_extra_connection_retry_seconds": round(max(0.0, self._next_fill_at - now), 1),
             "last_error": self._last_pool_error,
             "slots": [
                 {
@@ -268,6 +288,7 @@ class PooledHLLVRcon:
                     "idle_seconds": round(slot.idle_for(now), 1),
                     "calls": slot.calls,
                     "failures": slot.failures,
+                    "queue_timeouts": slot.queue_timeouts,
                     "last_latency_ms": round(slot.last_latency_ms, 1),
                     "last_error": slot.last_error,
                 }
@@ -291,23 +312,13 @@ class PooledHLLVRcon:
         for slot in list(self._healthy_slots()):
             if self._closed or slot.lock.locked() or slot.idle_for(now) < IDLE_PROBE_SECONDS:
                 continue
-            started = time.monotonic()
             try:
-                async with slot.lock:
-                    if not slot.connected():
-                        raise RconConnectionLostError("RCON idle lane disconnected")
-                    slot.calls += 1
-                    self._total_calls += 1
-                    slot.last_used_at = time.monotonic()
-                    await asyncio.wait_for(slot.client.get_server_session(), timeout=PROBE_TIMEOUT)
-                    slot.last_success_at = time.monotonic()
-                    slot.last_latency_ms = (slot.last_success_at - started) * 1000.0
-                    slot.last_error = None
+                await self._run_on_slot(slot, "get_server_session", PROBE_TIMEOUT, PROBE_TIMEOUT)
             except asyncio.CancelledError:
                 raise
+            except _PoolBusyError:
+                continue
             except Exception as exc:
-                slot.failures += 1
-                self._total_failures += 1
                 self._drop_slot(slot, exc)
                 logger.warning("RCON idle health probe failed on slot %s: %s", slot.index, exc)
 
@@ -315,8 +326,6 @@ class PooledHLLVRcon:
         try:
             while not self._closed:
                 try:
-                    # Fill immediately rather than sleeping first, so extra read lanes
-                    # become available shortly after the primary connects.
                     await self._fill_pool()
                     await self._probe_idle_slots()
                 except asyncio.CancelledError:
@@ -340,8 +349,6 @@ class PooledHLLVRcon:
         candidates = self._read_candidates(excluded)
         if not candidates:
             return None
-
-        # Prefer an immediately available lane, then the least recently used lane.
         unlocked = [slot for slot in candidates if not slot.lock.locked()]
         pool = unlocked or candidates
         return min(pool, key=lambda slot: (slot.last_used_at or slot.created_at, slot.index))
@@ -351,13 +358,26 @@ class PooledHLLVRcon:
         slot: _PoolSlot,
         method_name: str,
         timeout: float,
+        queue_timeout: float,
         *args: Any,
         **kwargs: Any,
     ) -> Any:
         started = time.monotonic()
-        async with slot.lock:
+        acquired = False
+        try:
+            try:
+                await asyncio.wait_for(slot.lock.acquire(), timeout=queue_timeout)
+                acquired = True
+            except asyncio.TimeoutError as exc:
+                slot.queue_timeouts += 1
+                self._total_queue_timeouts += 1
+                raise _PoolBusyError(
+                    f"RCON lane {slot.index} stayed busy for more than {queue_timeout:.1f}s"
+                ) from exc
+
             if not slot.connected():
                 raise RconConnectionLostError("RCON pool lane disconnected")
+
             method = getattr(slot.client, method_name)
             slot.calls += 1
             self._total_calls += 1
@@ -374,6 +394,9 @@ class PooledHLLVRcon:
                 slot.last_latency_ms = (slot.last_success_at - started) * 1000.0
                 slot.last_error = None
                 return result
+        finally:
+            if acquired and slot.lock.locked():
+                slot.lock.release()
 
     async def _read_call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         excluded: set[int] = set()
@@ -387,9 +410,20 @@ class PooledHLLVRcon:
             excluded.add(id(slot))
 
             try:
-                return await self._run_on_slot(slot, method_name, READ_TIMEOUT, *args, **kwargs)
+                return await self._run_on_slot(
+                    slot,
+                    method_name,
+                    READ_TIMEOUT,
+                    READ_QUEUE_TIMEOUT,
+                    *args,
+                    **kwargs,
+                )
             except asyncio.CancelledError:
                 raise
+            except _PoolBusyError as exc:
+                # Congestion is not a broken socket. Do not discard a healthy lane.
+                last_error = exc
+                continue
             except _TRANSIENT_ERRORS as exc:
                 last_error = exc
                 self._drop_slot(slot, exc)
@@ -412,12 +446,22 @@ class PooledHLLVRcon:
             raise RconConnectionError("No healthy RCON command connection is available")
 
         try:
-            return await self._run_on_slot(slot, method_name, WRITE_TIMEOUT, *args, **kwargs)
+            return await self._run_on_slot(
+                slot,
+                method_name,
+                WRITE_TIMEOUT,
+                WRITE_QUEUE_TIMEOUT,
+                *args,
+                **kwargs,
+            )
         except asyncio.CancelledError:
+            raise
+        except _PoolBusyError:
+            # Busy does not mean broken; leave the lane connected for the next action.
             raise
         except _TRANSIENT_ERRORS as exc:
             # Never automatically replay moderation/write commands. A timeout may
-            # happen after HLL:V already applied the action; replaying could duplicate
+            # occur after HLL:V already applied the action, so replaying could duplicate
             # a kick, ban, message, map change, etc.
             self._drop_slot(slot, exc)
             self._start_repair_task()
@@ -453,9 +497,10 @@ class PooledHLLVRcon:
 if hllrcon.HLLVRcon is not PooledHLLVRcon:
     hllrcon.HLLVRcon = PooledHLLVRcon
     logger.info(
-        "Installed HLL:V RCON connection pool: target=%s, read timeout=%.1fs, write timeout=%.1fs, idle probe=%.1fs",
+        "Installed HLL:V RCON pool: target=%s, read timeout=%.1fs, write timeout=%.1fs, read queue=%.1fs, write queue=%.1fs",
         POOL_SIZE,
         READ_TIMEOUT,
         WRITE_TIMEOUT,
-        IDLE_PROBE_SECONDS,
+        READ_QUEUE_TIMEOUT,
+        WRITE_QUEUE_TIMEOUT,
     )

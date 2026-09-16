@@ -6,6 +6,7 @@ from fastapi import Request
 # feature module imports HLLVRcon. This gives the entire bridge one command lane
 # plus multiple independent read lanes without rewriting every API module.
 import rcon_pool_patch  # noqa: F401
+import pool_policy  # noqa: F401
 
 import admin_request_api as admin_api
 import admin_support_api as support

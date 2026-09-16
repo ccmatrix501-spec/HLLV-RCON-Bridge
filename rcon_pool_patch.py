@@ -40,8 +40,10 @@ POOL_SIZE = _env_int("HLLV_RCON_POOL_SIZE", 3, 1, 5)
 CONNECT_TIMEOUT = _env_float("HLLV_RCON_POOL_CONNECT_TIMEOUT_SECONDS", 10.0, 3.0, 60.0)
 READ_TIMEOUT = _env_float("HLLV_RCON_READ_TIMEOUT_SECONDS", 22.0, 5.0, 120.0)
 WRITE_TIMEOUT = _env_float("HLLV_RCON_WRITE_TIMEOUT_SECONDS", 22.0, 5.0, 120.0)
-REPAIR_SECONDS = _env_float("HLLV_RCON_POOL_REPAIR_SECONDS", 10.0, 3.0, 120.0)
+REPAIR_SECONDS = _env_float("HLLV_RCON_POOL_REPAIR_SECONDS", 8.0, 2.0, 120.0)
 READ_RETRIES = _env_int("HLLV_RCON_READ_RETRIES", 1, 0, 3)
+IDLE_PROBE_SECONDS = _env_float("HLLV_RCON_IDLE_PROBE_SECONDS", 45.0, 15.0, 300.0)
+PROBE_TIMEOUT = _env_float("HLLV_RCON_PROBE_TIMEOUT_SECONDS", 6.0, 2.0, 30.0)
 
 _READ_PREFIXES = ("get_", "list_", "fetch_", "query_")
 _TRANSIENT_ERRORS = (
@@ -62,6 +64,10 @@ class _PoolSlot:
     lock: asyncio.Lock
     created_at: float
     last_used_at: float = 0.0
+    last_success_at: float = 0.0
+    last_latency_ms: float = 0.0
+    calls: int = 0
+    failures: int = 0
     last_error: str | None = None
 
     def connected(self) -> bool:
@@ -70,14 +76,22 @@ class _PoolSlot:
         except Exception:
             return False
 
+    def idle_for(self, now: float | None = None) -> float:
+        current = now if now is not None else time.monotonic()
+        reference = self.last_used_at or self.created_at
+        return max(0.0, current - reference)
+
 
 class PooledHLLVRcon:
-    """Drop-in HLLVRcon wrapper with one command lane and multiple read lanes.
+    """Drop-in HLLVRcon wrapper with isolated command and read lanes.
 
-    Slot 0 is kept for moderation/write commands whenever possible. Additional
-    slots service read-heavy polling such as players, logs, bans and stats.
-    Each TCP/RCON session has its own lock, so two coroutines never issue
-    commands concurrently on the same socket.
+    The first live slot is the command lane whenever possible. Additional slots
+    are used for read-heavy polling. Every socket has its own asyncio.Lock, so a
+    connection never receives overlapping RCON commands.
+
+    Startup only waits for one valid RCON connection. Extra read lanes warm in
+    the background, which keeps Railway deploy/healthcheck startup fast even when
+    the game server is slow to accept additional sessions.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -86,10 +100,12 @@ class PooledHLLVRcon:
         self._slots: list[_PoolSlot] = []
         self._primary: _PoolSlot | None = None
         self._pool_lock = asyncio.Lock()
-        self._read_cursor = 0
         self._repair_task: asyncio.Task[Any] | None = None
         self._closed = False
         self._last_pool_error: str | None = None
+        self._total_calls = 0
+        self._total_failures = 0
+        self._started_at = time.monotonic()
 
         self.host = kwargs.get("host", args[0] if len(args) > 0 else None)
         self.port = kwargs.get("port", args[1] if len(args) > 1 else None)
@@ -140,7 +156,24 @@ class PooledHLLVRcon:
             created_at=time.monotonic(),
         )
 
-    async def _fill_pool(self, *, require_one: bool) -> int:
+    async def _ensure_first_connection(self) -> int:
+        async with self._pool_lock:
+            for slot in list(self._slots):
+                if not slot.connected():
+                    self._drop_slot(slot, slot.last_error or "RCON connection is no longer active")
+            healthy = self._healthy_slots()
+            if healthy:
+                if self._primary is None:
+                    self._primary = healthy[0]
+                return len(healthy)
+
+            slot = await self._connect_one(0)
+            self._slots.append(slot)
+            self._primary = slot
+            logger.info("Primary RCON connection ready for %s:%s", self.host, self.port)
+            return 1
+
+    async def _fill_pool(self) -> int:
         async with self._pool_lock:
             for slot in list(self._slots):
                 if not slot.connected():
@@ -152,8 +185,6 @@ class PooledHLLVRcon:
                     slot = await self._connect_one(index)
                 except Exception as exc:
                     self._last_pool_error = str(exc)
-                    if require_one and not self._healthy_slots():
-                        raise
                     logger.warning(
                         "Could not add RCON pool connection %s/%s to %s:%s: %s",
                         len(self._healthy_slots()) + 1,
@@ -179,10 +210,10 @@ class PooledHLLVRcon:
 
     async def connect(self) -> Any:
         self._closed = False
-        connected = await self._fill_pool(require_one=True)
+        connected = await self._ensure_first_connection()
         self._start_repair_task()
         logger.info(
-            "RCON pool online for %s:%s with %s/%s connection(s)",
+            "RCON pool online for %s:%s with %s connection(s); warming toward %s in background",
             self.host,
             self.port,
             connected,
@@ -209,10 +240,12 @@ class PooledHLLVRcon:
     def pool_status(self) -> dict[str, Any]:
         healthy = self._healthy_slots()
         primary = self._promote_primary()
+        now = time.monotonic()
         return {
             "enabled": POOL_SIZE > 1,
             "target_connections": POOL_SIZE,
             "connected_connections": len(healthy),
+            "degraded": len(healthy) < POOL_SIZE,
             "primary_connected": bool(primary),
             "read_connections": max(0, len(healthy) - 1),
             "busy_connections": sum(1 for slot in healthy if slot.lock.locked()),
@@ -220,7 +253,26 @@ class PooledHLLVRcon:
             "write_timeout_seconds": WRITE_TIMEOUT,
             "connect_timeout_seconds": CONNECT_TIMEOUT,
             "repair_interval_seconds": REPAIR_SECONDS,
+            "idle_probe_seconds": IDLE_PROBE_SECONDS,
+            "read_retries": READ_RETRIES,
+            "total_calls": self._total_calls,
+            "total_failures": self._total_failures,
+            "uptime_seconds": round(max(0.0, now - self._started_at), 1),
             "last_error": self._last_pool_error,
+            "slots": [
+                {
+                    "index": slot.index,
+                    "role": "command" if slot is primary else "read",
+                    "connected": slot.connected(),
+                    "busy": slot.lock.locked(),
+                    "idle_seconds": round(slot.idle_for(now), 1),
+                    "calls": slot.calls,
+                    "failures": slot.failures,
+                    "last_latency_ms": round(slot.last_latency_ms, 1),
+                    "last_error": slot.last_error,
+                }
+                for slot in healthy
+            ],
         }
 
     def _start_repair_task(self) -> None:
@@ -234,17 +286,45 @@ class PooledHLLVRcon:
             return
         self._repair_task = loop.create_task(self._repair_loop(), name="hllv-rcon-pool-repair")
 
+    async def _probe_idle_slots(self) -> None:
+        now = time.monotonic()
+        for slot in list(self._healthy_slots()):
+            if self._closed or slot.lock.locked() or slot.idle_for(now) < IDLE_PROBE_SECONDS:
+                continue
+            started = time.monotonic()
+            try:
+                async with slot.lock:
+                    if not slot.connected():
+                        raise RconConnectionLostError("RCON idle lane disconnected")
+                    slot.calls += 1
+                    self._total_calls += 1
+                    slot.last_used_at = time.monotonic()
+                    await asyncio.wait_for(slot.client.get_server_session(), timeout=PROBE_TIMEOUT)
+                    slot.last_success_at = time.monotonic()
+                    slot.last_latency_ms = (slot.last_success_at - started) * 1000.0
+                    slot.last_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                slot.failures += 1
+                self._total_failures += 1
+                self._drop_slot(slot, exc)
+                logger.warning("RCON idle health probe failed on slot %s: %s", slot.index, exc)
+
     async def _repair_loop(self) -> None:
         try:
             while not self._closed:
-                await asyncio.sleep(REPAIR_SECONDS)
                 try:
-                    await self._fill_pool(require_one=False)
+                    # Fill immediately rather than sleeping first, so extra read lanes
+                    # become available shortly after the primary connects.
+                    await self._fill_pool()
+                    await self._probe_idle_slots()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     self._last_pool_error = str(exc)
                     logger.warning("RCON pool repair failed: %s", exc)
+                await asyncio.sleep(REPAIR_SECONDS)
         except asyncio.CancelledError:
             pass
 
@@ -252,7 +332,6 @@ class PooledHLLVRcon:
         healthy = [slot for slot in self._healthy_slots() if id(slot) not in excluded]
         if not healthy:
             return []
-
         primary = self._promote_primary()
         readers = [slot for slot in healthy if slot is not primary]
         return readers or healthy
@@ -262,11 +341,39 @@ class PooledHLLVRcon:
         if not candidates:
             return None
 
+        # Prefer an immediately available lane, then the least recently used lane.
         unlocked = [slot for slot in candidates if not slot.lock.locked()]
         pool = unlocked or candidates
-        slot = pool[self._read_cursor % len(pool)]
-        self._read_cursor = (self._read_cursor + 1) % 1_000_000
-        return slot
+        return min(pool, key=lambda slot: (slot.last_used_at or slot.created_at, slot.index))
+
+    async def _run_on_slot(
+        self,
+        slot: _PoolSlot,
+        method_name: str,
+        timeout: float,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        started = time.monotonic()
+        async with slot.lock:
+            if not slot.connected():
+                raise RconConnectionLostError("RCON pool lane disconnected")
+            method = getattr(slot.client, method_name)
+            slot.calls += 1
+            self._total_calls += 1
+            slot.last_used_at = time.monotonic()
+            try:
+                result = await asyncio.wait_for(method(*args, **kwargs), timeout=timeout)
+            except Exception as exc:
+                slot.failures += 1
+                self._total_failures += 1
+                slot.last_error = str(exc)
+                raise
+            else:
+                slot.last_success_at = time.monotonic()
+                slot.last_latency_ms = (slot.last_success_at - started) * 1000.0
+                slot.last_error = None
+                return result
 
     async def _read_call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         excluded: set[int] = set()
@@ -280,12 +387,7 @@ class PooledHLLVRcon:
             excluded.add(id(slot))
 
             try:
-                async with slot.lock:
-                    if not slot.connected():
-                        raise RconConnectionLostError("RCON pool lane disconnected")
-                    method = getattr(slot.client, method_name)
-                    slot.last_used_at = time.monotonic()
-                    return await asyncio.wait_for(method(*args, **kwargs), timeout=READ_TIMEOUT)
+                return await self._run_on_slot(slot, method_name, READ_TIMEOUT, *args, **kwargs)
             except asyncio.CancelledError:
                 raise
             except _TRANSIENT_ERRORS as exc:
@@ -293,15 +395,16 @@ class PooledHLLVRcon:
                 self._drop_slot(slot, exc)
                 self._start_repair_task()
                 logger.warning(
-                    "RCON read %s failed on one pool lane; trying another if available: %s",
+                    "RCON read %s failed on slot %s; trying another lane if available: %s",
                     method_name,
+                    slot.index,
                     exc,
                 )
                 continue
 
         if last_error is not None:
             raise last_error
-        raise RconConnectionError("No healthy RCON connection is available")
+        raise RconConnectionError("No healthy RCON read connection is available")
 
     async def _write_call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         slot = self._promote_primary()
@@ -309,19 +412,13 @@ class PooledHLLVRcon:
             raise RconConnectionError("No healthy RCON command connection is available")
 
         try:
-            async with slot.lock:
-                if not slot.connected():
-                    raise RconConnectionLostError("RCON command connection disconnected")
-                method = getattr(slot.client, method_name)
-                slot.last_used_at = time.monotonic()
-                return await asyncio.wait_for(method(*args, **kwargs), timeout=WRITE_TIMEOUT)
+            return await self._run_on_slot(slot, method_name, WRITE_TIMEOUT, *args, **kwargs)
         except asyncio.CancelledError:
             raise
         except _TRANSIENT_ERRORS as exc:
-            # Never automatically replay a moderation/write command. A timeout can
-            # happen after the game server has already applied it, so replaying could
-            # duplicate side effects. Drop the bad lane and let the next command use
-            # a promoted healthy connection instead.
+            # Never automatically replay moderation/write commands. A timeout may
+            # happen after HLL:V already applied the action; replaying could duplicate
+            # a kick, ban, message, map change, etc.
             self._drop_slot(slot, exc)
             self._start_repair_task()
             raise
@@ -356,8 +453,9 @@ class PooledHLLVRcon:
 if hllrcon.HLLVRcon is not PooledHLLVRcon:
     hllrcon.HLLVRcon = PooledHLLVRcon
     logger.info(
-        "Installed HLL:V RCON connection pool: target=%s, read timeout=%.1fs, write timeout=%.1fs",
+        "Installed HLL:V RCON connection pool: target=%s, read timeout=%.1fs, write timeout=%.1fs, idle probe=%.1fs",
         POOL_SIZE,
         READ_TIMEOUT,
         WRITE_TIMEOUT,
+        IDLE_PROBE_SECONDS,
     )

@@ -29,6 +29,7 @@ jobs:
       - name: Smoke test production bridge entrypoint without a live game server
         env:
           HLLV_RCON_AUTO_CONNECT: 'false'
+          PLAYER_STATS_DB_PATH: /tmp/hllv-ci-player-stats.db
         run: |
           python -m uvicorn admin_support_entry:app --host 127.0.0.1 --port 8080 >/tmp/hllv-rcon.log 2>&1 &
           pid=$!

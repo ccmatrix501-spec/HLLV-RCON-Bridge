@@ -25,6 +25,7 @@ COPY admin_request_api.py .
 COPY connection_keeper.py .
 COPY admin_support_api.py .
 COPY admin_support_entry.py .
+COPY player_labels_api.py .
 
 EXPOSE 8080
 

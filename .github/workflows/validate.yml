@@ -24,8 +24,33 @@ jobs:
           test -f rcon_pool_patch.py
           test -f pool_policy.py
           test -f pool_status_api.py
+          test -f bridge_resilience.py
           test -f connection_keeper.py
           test -f app.py
+      - name: Verify critical routes register
+        env:
+          HLLV_RCON_AUTO_CONNECT: 'false'
+          PLAYER_STATS_DB_PATH: /tmp/hllv-ci-player-stats-routes.db
+        run: |
+          python - <<'PY'
+          from admin_support_entry import app
+          routes = {(getattr(route, 'path', ''), method) for route in app.routes for method in (getattr(route, 'methods', set()) or set())}
+          required = {
+              ('/health', 'GET'),
+              ('/api/v2/connection/status', 'GET'),
+              ('/api/v2/connection/pool', 'GET'),
+              ('/api/v2/resilience/status', 'GET'),
+              ('/api/v2/players', 'GET'),
+              ('/api/v2/logs', 'GET'),
+              ('/api/v2/kick', 'POST'),
+              ('/api/v2/temp-ban', 'POST'),
+              ('/api/v2/perma-ban', 'POST'),
+          }
+          missing = sorted(required - routes)
+          if missing:
+              raise SystemExit(f'Missing production routes: {missing}')
+          print(f'Validated {len(routes)} registered route/method pairs')
+          PY
       - name: Smoke test production bridge entrypoint without a live game server
         env:
           HLLV_RCON_AUTO_CONNECT: 'false'
@@ -47,5 +72,6 @@ jobs:
           grep -q '"ok":true' /tmp/bridge-health.json
           curl --fail --silent --show-error http://127.0.0.1:8080/api/v2/connection/status | grep -q '"connected":false'
           curl --fail --silent --show-error http://127.0.0.1:8080/api/v2/connection/pool | grep -q '"connected_connections":0'
+          curl --fail --silent --show-error http://127.0.0.1:8080/api/v2/resilience/status | grep -q '"ok":true'
       - name: Build production Docker image
         run: docker build --pull=false -t hllv-rcon-bridge-ci .

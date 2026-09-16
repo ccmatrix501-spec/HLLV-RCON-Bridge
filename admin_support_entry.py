@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from fastapi import Request
 
+# Install the pooled HLLVRcon wrapper before app.py, connection_keeper.py or any
+# feature module imports HLLVRcon. This gives the entire bridge one command lane
+# plus multiple independent read lanes without rewriting every API module.
+import rcon_pool_patch  # noqa: F401
+
 import admin_request_api as admin_api
 import admin_support_api as support
 import match_leaderboard_api  # Registers server-wide current match leaderboard command/routes.
 import public_stats_api  # Registers the efficient read-only public player stats route.
 import live_stats_api  # Registers the lightweight near-live current-player stats route.
 import player_labels_api  # Registers persistent controller display-name labels.
+import pool_status_api  # Registers RCON connection-pool diagnostics.
 from admin_support_api import admin_support_action, app
 
 # Persist the support request before the Discord DM is sent so its buttons are

@@ -17,6 +17,11 @@ import player_labels_api  # Registers persistent controller display-name labels.
 import pool_status_api  # Registers RCON connection-pool diagnostics.
 from admin_support_api import admin_support_action, app
 
+# Add bridge-wide load shedding only after the production app has been assembled.
+# This protects all current and future /api routes from unbounded HTTP concurrency
+# without forcing feature modules to know anything about the RCON pool internals.
+import bridge_resilience  # noqa: E402,F401
+
 # Persist the support request before the Discord DM is sent so its buttons are
 # valid immediately, even if the admin clicks as soon as the DM arrives.
 async def _eager_support_admin_request(entry, reason: str) -> None:

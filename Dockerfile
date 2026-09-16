@@ -9,6 +9,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY rcon_pool_patch.py .
+COPY pool_status_api.py .
 COPY app.py .
 COPY rotation_api.py .
 COPY message_everyone_api.py .

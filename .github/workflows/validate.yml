@@ -1,0 +1,27 @@
+name: Validate RCON Bridge
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Compile Python modules
+        run: python -m compileall -q .
+      - name: Verify bridge entrypoints
+        run: |
+          test -f admin_support_entry.py
+          test -f rcon_pool_patch.py
+          test -f pool_status_api.py
+          test -f connection_keeper.py
+          test -f app.py

@@ -17,6 +17,12 @@ import player_labels_api  # Registers persistent controller display-name labels.
 import pool_status_api  # Registers RCON connection-pool diagnostics.
 from admin_support_api import admin_support_action, app
 
+# HLL:V's declared player-stat response currently omits revives. Install the
+# compatibility layer after the stats modules are assembled so it can use an
+# exact future revive field when present and otherwise improve best-effort log
+# detection without creating another permanent RCON polling worker.
+import revive_tracking_patch  # noqa: E402,F401
+
 # Add bridge-wide load shedding only after the production app has been assembled.
 # This protects all current and future /api routes from unbounded HTTP concurrency
 # without forcing feature modules to know anything about the RCON pool internals.

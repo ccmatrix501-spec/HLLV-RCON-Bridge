@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import asyncio
 import logging
 import time
 from typing import Any
@@ -87,6 +88,35 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
     data["raw_message"] = raw
     data["log_class"] = type(entry).__name__
     return data
+
+
+@app.on_event("startup")
+async def probe_admin_logs_after_startup() -> None:
+    """One-shot production diagnostic for the game -> RCON -> bridge log path."""
+    async def _probe() -> None:
+        last_error: Exception | None = None
+        for _ in range(12):
+            await asyncio.sleep(5)
+            try:
+                started = time.monotonic()
+                response = await _call(_client().get_admin_log(seconds_span=3600))
+                entries = list(getattr(response, "entries", []) or [])
+                elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+                first_at = getattr(entries[0], "timestamp", None) if entries else None
+                last_at = getattr(entries[-1], "timestamp", None) if entries else None
+                logger.info(
+                    "Admin log startup probe entries=%s elapsed_ms=%s first=%s last=%s",
+                    len(entries),
+                    elapsed_ms,
+                    first_at.isoformat() if hasattr(first_at, "isoformat") else first_at,
+                    last_at.isoformat() if hasattr(last_at, "isoformat") else last_at,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+        logger.warning("Admin log startup probe could not complete: %s", last_error)
+
+    asyncio.create_task(_probe(), name="admin-log-startup-probe")
 
 
 @app.get("/api/v2/logs")

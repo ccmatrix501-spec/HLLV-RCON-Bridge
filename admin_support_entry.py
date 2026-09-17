@@ -28,6 +28,12 @@ import revive_tracking_patch  # noqa: E402,F401
 # without forcing feature modules to know anything about the RCON pool internals.
 import bridge_resilience  # noqa: E402,F401
 
+# Public /api/v2 calls must carry the shared integration secret. Railway-private
+# calls from the web controller remain internal and do not need the public header.
+from public_api_guard import install_public_api_guard  # noqa: E402
+
+install_public_api_guard(app)
+
 # Persist the support request before the Discord DM is sent so its buttons are
 # valid immediately, even if the admin clicks as soon as the DM arrives.
 async def _eager_support_admin_request(entry, reason: str) -> None:

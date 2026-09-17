@@ -104,9 +104,14 @@ async def probe_admin_logs_after_startup() -> None:
                 elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
                 first_at = getattr(entries[0], "timestamp", None) if entries else None
                 last_at = getattr(entries[-1], "timestamp", None) if entries else None
+                type_counts: dict[str, int] = {}
+                for entry in entries:
+                    key = type(entry).__name__.removesuffix("HLLVAdminLog").upper() or "OTHER"
+                    type_counts[key] = type_counts.get(key, 0) + 1
                 print(
                     "[ADMIN-LOG-DIAG] startup probe "
                     f"entries={len(entries)} elapsed_ms={elapsed_ms} "
+                    f"types={type_counts} "
                     f"first={first_at.isoformat() if hasattr(first_at, 'isoformat') else first_at} "
                     f"last={last_at.isoformat() if hasattr(last_at, 'isoformat') else last_at}",
                     flush=True,

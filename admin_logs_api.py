@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
+import time
 from typing import Any
 
 from fastapi import Query
@@ -8,6 +10,9 @@ from fastapi.encoders import jsonable_encoder
 
 from access_management_api import app
 from app import _call, _client
+
+logger = logging.getLogger("hllv-rcon-bridge.admin-logs")
+_last_diag = {"at": 0.0, "count": None, "seconds": None}
 
 
 # The hllrcon response model declares admin-log entries using the common base type.
@@ -89,10 +94,37 @@ async def admin_logs(
     seconds: int = Query(default=3600, ge=0, le=604800),
     filter: str | None = Query(default=None),
 ) -> dict[str, Any]:
+    started = time.monotonic()
     response = await _call(_client().get_admin_log(seconds_span=seconds, filter_=filter or None))
     entries = list(getattr(response, "entries", []) or [])
+    elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+
+    # Diagnose the live Logs panel without writing player/chat contents to Railway.
+    # Log when the count changes, when the requested window changes, or at most once
+    # per minute while unchanged. This makes a 200-with-empty-body distinguishable
+    # from a browser/rendering problem.
+    now = time.monotonic()
+    count = len(entries)
+    if (
+        _last_diag["count"] != count
+        or _last_diag["seconds"] != seconds
+        or now - float(_last_diag["at"] or 0.0) >= 60.0
+    ):
+        first_at = getattr(entries[0], "timestamp", None) if entries else None
+        last_at = getattr(entries[-1], "timestamp", None) if entries else None
+        logger.info(
+            "Admin log API window=%ss entries=%s elapsed_ms=%s first=%s last=%s",
+            seconds,
+            count,
+            elapsed_ms,
+            first_at.isoformat() if hasattr(first_at, "isoformat") else first_at,
+            last_at.isoformat() if hasattr(last_at, "isoformat") else last_at,
+        )
+        _last_diag.update({"at": now, "count": count, "seconds": seconds})
+
     return {
         "entries": [_serialize_entry(entry) for entry in entries],
-        "count": len(entries),
+        "count": count,
         "seconds": seconds,
+        "elapsed_ms": elapsed_ms,
     }

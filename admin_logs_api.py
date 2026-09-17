@@ -104,17 +104,17 @@ async def probe_admin_logs_after_startup() -> None:
                 elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
                 first_at = getattr(entries[0], "timestamp", None) if entries else None
                 last_at = getattr(entries[-1], "timestamp", None) if entries else None
-                logger.info(
-                    "Admin log startup probe entries=%s elapsed_ms=%s first=%s last=%s",
-                    len(entries),
-                    elapsed_ms,
-                    first_at.isoformat() if hasattr(first_at, "isoformat") else first_at,
-                    last_at.isoformat() if hasattr(last_at, "isoformat") else last_at,
+                print(
+                    "[ADMIN-LOG-DIAG] startup probe "
+                    f"entries={len(entries)} elapsed_ms={elapsed_ms} "
+                    f"first={first_at.isoformat() if hasattr(first_at, 'isoformat') else first_at} "
+                    f"last={last_at.isoformat() if hasattr(last_at, 'isoformat') else last_at}",
+                    flush=True,
                 )
                 return
             except Exception as exc:
                 last_error = exc
-        logger.warning("Admin log startup probe could not complete: %s", last_error)
+        print(f"[ADMIN-LOG-DIAG] startup probe failed: {last_error}", flush=True)
 
     asyncio.create_task(_probe(), name="admin-log-startup-probe")
 

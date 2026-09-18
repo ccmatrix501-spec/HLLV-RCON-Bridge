@@ -268,10 +268,44 @@ async def server(type: str = Query(default="session")) -> Any:
 
     data = _dump(result)
     if isinstance(data, dict) and type != "config":
-        data.setdefault("map", data.get("map_id") or data.get("map_name"))
-        data.setdefault("max_players", data.get("max_player_count"))
-        data.setdefault("current_players", data.get("player_count"))
-        data.setdefault("next_map", data.get("next_map_id") or data.get("next_map_name"))
+        # FastAPI's jsonable_encoder serializes Pydantic models using aliases by
+        # default. hllrcon therefore emits camelCase keys such as mapName,
+        # playerCount and remainingMatchTime even though the Python model fields
+        # are snake_case. Keep the original fields, but add stable normalized
+        # aliases for controller clients.
+        def pick(*keys: str) -> Any:
+            for key in keys:
+                value = data.get(key)
+                if value is not None and value != "":
+                    return value
+            return None
+
+        map_value = pick("map", "map_id", "mapId", "map_name", "mapName")
+        player_count = pick("player_count", "playerCount", "current_players", "currentPlayers")
+        max_players = pick("max_player_count", "maxPlayerCount", "max_players", "maxPlayers")
+        remaining = pick(
+            "remaining_match_time",
+            "remainingMatchTime",
+            "remaining_time",
+            "remainingTime",
+            "time_remaining",
+            "timeRemaining",
+        )
+        next_map = pick("next_map", "nextMap", "next_map_id", "nextMapId", "next_map_name", "nextMapName")
+
+        data["map"] = map_value
+        data["current_players"] = player_count
+        data["max_players"] = max_players
+        data["remaining_time"] = remaining
+        data["next_map"] = next_map
+
+        # Also provide snake_case aliases so older controller modules remain
+        # compatible regardless of hllrcon's serialization aliases.
+        data.setdefault("map_name", pick("map_name", "mapName"))
+        data.setdefault("map_id", pick("map_id", "mapId"))
+        data.setdefault("player_count", player_count)
+        data.setdefault("max_player_count", max_players)
+        data.setdefault("remaining_match_time", remaining)
     return data
 
 

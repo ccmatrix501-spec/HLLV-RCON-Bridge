@@ -31,6 +31,7 @@ COPY pool_policy.py .
 COPY pool_status_api.py .
 COPY revive_tracking_patch.py .
 COPY bridge_resilience.py .
+COPY advanced_admin_api.py .
 COPY public_api_guard.py .
 
 EXPOSE 8080

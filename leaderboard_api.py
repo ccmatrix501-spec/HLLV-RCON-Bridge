@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger("hllv-rcon-bridge.leaderboard")
 
 LEADERBOARD_COMMANDS_ENABLED = os.getenv("PLAYER_LEADERBOARD_CHAT_COMMANDS", "true").strip().lower() not in {"0", "false", "no", "off"}
-LEADERBOARD_POLL_SECONDS = max(1.0, float(os.getenv("PLAYER_LEADERBOARD_POLL_SECONDS", "2")))
+LEADERBOARD_POLL_SECONDS = max(1.0, float(os.getenv("PLAYER_LEADERBOARD_POLL_SECONDS", "10")))
 LEADERBOARD_LOG_WINDOW_SECONDS = max(10, int(os.getenv("PLAYER_LEADERBOARD_LOG_WINDOW_SECONDS", "30")))
 LEADERBOARD_COOLDOWN_SECONDS = max(5, int(os.getenv("PLAYER_LEADERBOARD_COOLDOWN_SECONDS", "30")))
 MIN_KD_KILLS = max(1, int(os.getenv("PLAYER_LEADERBOARD_MIN_KD_KILLS", "10")))

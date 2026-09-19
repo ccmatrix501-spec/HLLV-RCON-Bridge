@@ -17,7 +17,7 @@ from stats_tracker_api import _connect_db
 
 logger = logging.getLogger("hllv-rcon-bridge.admin-support")
 
-REPLY_POLL_SECONDS = max(1.0, float(__import__("os").getenv("HLLV_ADMIN_REPLY_POLL_SECONDS", "2")))
+REPLY_POLL_SECONDS = max(1.0, float(__import__("os").getenv("HLLV_ADMIN_REPLY_POLL_SECONDS", "3")))
 REPLY_LOG_WINDOW_SECONDS = max(10, int(__import__("os").getenv("HLLV_ADMIN_REPLY_LOG_WINDOW_SECONDS", "30")))
 REPLY_COOLDOWN_SECONDS = max(3, int(__import__("os").getenv("HLLV_ADMIN_REPLY_COOLDOWN_SECONDS", "5")))
 

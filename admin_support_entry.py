@@ -14,6 +14,7 @@ import match_leaderboard_api  # Registers server-wide current match leaderboard 
 import public_stats_api  # Registers the efficient read-only public player stats route.
 import live_stats_api  # Registers the lightweight near-live current-player stats route.
 import player_labels_api  # Registers persistent controller display-name labels.
+import advanced_admin_api  # Registers advanced HLL:V administration routes.
 import pool_status_api  # Registers RCON connection-pool diagnostics.
 from admin_support_api import admin_support_action, app
 

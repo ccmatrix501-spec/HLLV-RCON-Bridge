@@ -26,7 +26,7 @@ lifetime_leaderboard.COMMANDS.pop("!leaderboard", None)
 logger = logging.getLogger("hllv-rcon-bridge.match-leaderboard")
 
 COMMAND = "!leaderboard"
-POLL_SECONDS = max(1.0, float(os.getenv("MATCH_LEADERBOARD_POLL_SECONDS", "2")))
+POLL_SECONDS = max(1.0, float(os.getenv("MATCH_LEADERBOARD_POLL_SECONDS", "5")))
 LOG_WINDOW_SECONDS = max(10, int(os.getenv("MATCH_LEADERBOARD_LOG_WINDOW_SECONDS", "30")))
 CHAT_COOLDOWN_SECONDS = max(30, int(os.getenv("MATCH_LEADERBOARD_CHAT_COOLDOWN_SECONDS", "60")))
 

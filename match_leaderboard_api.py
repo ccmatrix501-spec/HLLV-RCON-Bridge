@@ -29,6 +29,8 @@ COMMAND = "!leaderboard"
 POLL_SECONDS = max(1.0, float(os.getenv("MATCH_LEADERBOARD_POLL_SECONDS", "5")))
 LOG_WINDOW_SECONDS = max(10, int(os.getenv("MATCH_LEADERBOARD_LOG_WINDOW_SECONDS", "30")))
 CHAT_COOLDOWN_SECONDS = max(30, int(os.getenv("MATCH_LEADERBOARD_CHAT_COOLDOWN_SECONDS", "60")))
+HALFTIME_CHECK_SECONDS = max(15.0, float(os.getenv("MATCH_LEADERBOARD_HALFTIME_CHECK_SECONDS", "30")))
+HALFTIME_ENABLED = os.getenv("MATCH_LEADERBOARD_HALFTIME_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 
 class Runtime:
@@ -38,6 +40,10 @@ class Runtime:
         self.last_poll_at: datetime | None = None
         self.last_error: str | None = None
         self.last_broadcast_at: datetime | None = None
+        self.halftime_task: asyncio.Task[Any] | None = None
+        self.match_key: str | None = None
+        self.match_initial_seconds: int | None = None
+        self.halftime_sent_for: str | None = None
 
 
 runtime = Runtime()
@@ -309,6 +315,95 @@ def _cleanup_seen() -> None:
         db.execute("DELETE FROM match_leaderboard_command_events WHERE seen_at < ?", (cutoff,))
 
 
+
+def _duration_seconds(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, timedelta):
+        return max(0, int(value.total_seconds()))
+    text = str(value).strip().upper()
+    if not text:
+        return None
+    if text.startswith("PT"):
+        text = text[2:]
+        hours = minutes = seconds = 0.0
+        import re
+        m = re.fullmatch(r"(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?", text)
+        if m:
+            hours = float(m.group(1) or 0)
+            minutes = float(m.group(2) or 0)
+            seconds = float(m.group(3) or 0)
+            return max(0, int(hours * 3600 + minutes * 60 + seconds))
+    try:
+        return max(0, int(float(text)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_value(session: Any, *names: str) -> Any:
+    for name in names:
+        value = getattr(session, name, None)
+        if value is not None and value != "":
+            return value
+    try:
+        data = session.model_dump(by_alias=True)
+    except Exception:
+        data = {}
+    for name in names:
+        if name in data and data[name] not in (None, ""):
+            return data[name]
+    return None
+
+
+async def _halftime_worker() -> None:
+    """Broadcast once when the current match clock reaches half of its observed duration.
+
+    This is deliberately a separate low-frequency worker. It only requests the
+    server session every 30 seconds and performs the heavier player snapshot/send
+    once per match, so it does not add another rapid player/log polling loop.
+    """
+    logger.info("Half-match leaderboard broadcaster started: enabled=%s check=%ss", HALFTIME_ENABLED, HALFTIME_CHECK_SECONDS)
+    while True:
+        try:
+            if HALFTIME_ENABLED and state.client is not None and state.client.is_connected():
+                session = await _call(_client().get_server_session())
+                map_name = str(_session_value(session, "map_name", "mapName", "map", "map_id", "mapId") or "unknown")
+                remaining = _duration_seconds(_session_value(
+                    session, "remaining_match_time", "remainingMatchTime",
+                    "remaining_time", "remainingTime", "time_remaining", "timeRemaining"
+                ))
+                if remaining is not None:
+                    # A large upward jump or a map change means a new match.
+                    if runtime.match_key is None or not runtime.match_key.startswith(map_name + "|") or (
+                        runtime.match_initial_seconds is not None and remaining > runtime.match_initial_seconds + 120
+                    ):
+                        runtime.match_key = f"{map_name}|{_iso()}"
+                        runtime.match_initial_seconds = remaining
+                        runtime.halftime_sent_for = None
+                    elif runtime.match_initial_seconds is None or remaining > runtime.match_initial_seconds:
+                        runtime.match_initial_seconds = remaining
+
+                    initial = runtime.match_initial_seconds or remaining
+                    halfway = initial / 2
+                    if (
+                        runtime.match_key
+                        and runtime.halftime_sent_for != runtime.match_key
+                        and initial >= 600
+                        and remaining <= halfway
+                    ):
+                        result = await _broadcast_current_match_leaderboard()
+                        runtime.halftime_sent_for = runtime.match_key
+                        logger.info(
+                            "Half-match leaderboard broadcast: map=%s remaining=%ss initial=%ss sent=%s failed=%s",
+                            map_name, remaining, initial, result["sent"], result["failed"]
+                        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Half-match leaderboard check failed: %s", exc)
+        await asyncio.sleep(HALFTIME_CHECK_SECONDS)
+
+
 async def _worker() -> None:
     logger.info(
         "Server-wide current match leaderboard command started: command=%s cooldown=%ss",
@@ -337,6 +432,7 @@ async def _worker() -> None:
 async def start_match_leaderboard_worker() -> None:
     _init_match_leaderboard_db()
     runtime.task = asyncio.create_task(_worker(), name="hllv-current-match-leaderboard")
+    runtime.halftime_task = asyncio.create_task(_halftime_worker(), name="hllv-half-match-leaderboard")
 
 
 @app.on_event("shutdown")
@@ -348,6 +444,13 @@ async def stop_match_leaderboard_worker() -> None:
         except asyncio.CancelledError:
             pass
         runtime.task = None
+    if runtime.halftime_task:
+        runtime.halftime_task.cancel()
+        try:
+            await runtime.halftime_task
+        except asyncio.CancelledError:
+            pass
+        runtime.halftime_task = None
 
 
 @app.post("/api/v2/leaderboard/broadcast")
@@ -381,4 +484,9 @@ async def match_leaderboard_status() -> dict[str, Any]:
         "last_broadcast_at": runtime.last_broadcast_at.isoformat() if runtime.last_broadcast_at else None,
         "last_poll_at": runtime.last_poll_at.isoformat() if runtime.last_poll_at else None,
         "last_error": runtime.last_error,
+        "halftime_enabled": HALFTIME_ENABLED,
+        "halftime_check_seconds": HALFTIME_CHECK_SECONDS,
+        "halftime_match_key": runtime.match_key,
+        "halftime_initial_seconds": runtime.match_initial_seconds,
+        "halftime_sent_for_current_match": bool(runtime.match_key and runtime.halftime_sent_for == runtime.match_key),
     }

@@ -20,7 +20,7 @@ RULES=os.getenv("HLLV_RULES_TEXT","Use teamwork, follow server rules, and respec
 _task=None; _started=datetime.now(UTC); _cooldowns={}
 
 PUBLIC={"!help","!commands","!discord","!website","!rules","!map","!nextmap","!time","!players","!score","!queue","!admins","!status","!rank","!kills","!deaths","!kd","!revives","!favorite","!top10","!votestatus"}
-ADMIN={"!cancelvote","!startvote","!kick","!ban","!tempban","!unban","!warn","!message","!broadcast","!mapchange","!restartmatch","!addvip","!removevip","!history","!settime","!resettime"}
+ADMIN={"!cancelvote","!startvote","!kick","!ban","!tempban","!unban","!warn","!message","!broadcast","!mapchange","!restartmatch","!addvip","!removevip","!history","!settime","!resettime","!setwarmup","!resetwarmup"}
 
 def _now(): return datetime.now(UTC)
 def _iso(v=None): return (v or _now()).isoformat().replace("+00:00","Z")
@@ -184,10 +184,50 @@ async def _admin(entry,cmd,args):
             fn=getattr(_client(),method,None)
             if callable(fn): await _call(fn()); return
         raise ValueError("CURRENT RCON LIBRARY DOES NOT EXPOSE MATCH RESTART")
-    if cmd in {"!settime","!resettime"}:
+    if cmd in {"!settime","!resettime","!setwarmup","!resetwarmup"}:
         s=await _session()
-        mode=str(_pick(s,"gameMode","game_mode","mode") or "").strip()
-        if not mode: raise ValueError("CURRENT GAME MODE COULD NOT BE DETECTED")
+        # hllrcon's HLL:V session payload does not consistently expose gameMode.
+        # Derive it from the current map/rotation when needed; timer APIs require
+        # the mode key, not merely the display map name.
+        mode=str(_pick(s,"gameMode","game_mode","mode","gameModeId","game_mode_id") or "").strip()
+        if not mode:
+            current=str(_pick(s,"map","mapName","map_name","mapId","map_id") or "").strip()
+            candidates=[]
+            try:
+                rot=_dump(await _call(_client().get_map_rotation()))
+                if isinstance(rot,dict):
+                    for key in ("maps","rotation","items","entries","result","data"):
+                        if isinstance(rot.get(key),list): candidates=rot[key]; break
+                elif isinstance(rot,list): candidates=rot
+            except Exception: candidates=[]
+            cur=current.casefold()
+            for item in candidates:
+                d=item if isinstance(item,dict) else {}
+                names=[str(d.get(k) or "") for k in ("map","mapName","map_name","mapId","map_id","name","id")]
+                if cur and any(cur==x.strip().casefold() for x in names if x):
+                    mode=str(_pick(d,"gameMode","game_mode","mode","gameModeId","game_mode_id") or "").strip()
+                    if mode: break
+            if not mode and current:
+                # HLL/HLL:V map IDs commonly encode the mode as a suffix/token.
+                m=re.search(r"(?:_|-)(warfare|offensive|skirmish|control|conquest|invasion)(?:_|-|$)",current,re.I)
+                if m: mode=m.group(1)
+        if not mode: raise ValueError("GAME MODE IS NOT EXPOSED BY THE CURRENT HLL:V SESSION/ROTATION")
+        if cmd=="!resetwarmup":
+            for method in ("remove_warmup_timer","remove_warmup_timer_override"):
+                fn=getattr(_client(),method,None)
+                if callable(fn):
+                    await _call(fn(mode)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nWARMUP TIMER RESET: {mode}"); return
+            raise ValueError("CURRENT RCON LIBRARY DOES NOT EXPOSE WARMUP TIMER RESET")
+        if cmd=="!setwarmup":
+            token=(args.split()[0] if args else "").lower()
+            m=re.fullmatch(r"(\d+)([mh]?)",token)
+            if not m: raise ValueError("USAGE: !setwarmup <5m|10m>")
+            n=int(m.group(1)); unit=m.group(2) or "m"; minutes=n*60 if unit=="h" else n
+            for method in ("set_warmup_timer","set_warmup_timer_override"):
+                fn=getattr(_client(),method,None)
+                if callable(fn):
+                    await _call(fn(mode,minutes)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nWARMUP TIME SET: {minutes} MINUTES ({mode})"); return
+            raise ValueError("CURRENT RCON LIBRARY DOES NOT EXPOSE WARMUP TIMER OVERRIDE")
         if cmd=="!resettime":
             for method in ("remove_match_timer","remove_match_timer_override"):
                 fn=getattr(_client(),method,None)

@@ -216,7 +216,7 @@ async def _admin(entry,cmd,args):
             for method in ("remove_warmup_timer","remove_warmup_timer_override"):
                 fn=getattr(_client(),method,None)
                 if callable(fn):
-                    await _call(fn(mode)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nWARMUP TIMER RESET: {mode}"); return
+                    await _call(fn(mode)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nWARMUP OVERRIDE RESET FOR {mode}\nAPPLIES NEXT MATCH OR AFTER MAP RESET"); return
             raise ValueError("CURRENT RCON LIBRARY DOES NOT EXPOSE WARMUP TIMER RESET")
         if cmd=="!setwarmup":
             token=(args.split()[0] if args else "").lower()
@@ -226,13 +226,13 @@ async def _admin(entry,cmd,args):
             for method in ("set_warmup_timer","set_warmup_timer_override"):
                 fn=getattr(_client(),method,None)
                 if callable(fn):
-                    await _call(fn(mode,minutes)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nWARMUP TIME SET: {minutes} MINUTES ({mode})"); return
+                    await _call(fn(mode,minutes)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nWARMUP DURATION SET: {minutes} MINUTES ({mode})\nAPPLIES NEXT MATCH OR AFTER MAP RESET"); return
             raise ValueError("CURRENT RCON LIBRARY DOES NOT EXPOSE WARMUP TIMER OVERRIDE")
         if cmd=="!resettime":
             for method in ("remove_match_timer","remove_match_timer_override"):
                 fn=getattr(_client(),method,None)
                 if callable(fn):
-                    await _call(fn(mode)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nMATCH TIMER RESET: {mode}"); return
+                    await _call(fn(mode)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nMATCH TIMER OVERRIDE RESET FOR {mode}\nAPPLIES NEXT MATCH OR AFTER MAP RESET"); return
             raise ValueError("CURRENT RCON LIBRARY DOES NOT EXPOSE MATCH TIMER RESET")
         token=(args.split()[0] if args else "").lower()
         m=re.fullmatch(r"(\d+)([mh]?)",token)
@@ -242,7 +242,7 @@ async def _admin(entry,cmd,args):
         for method in ("set_match_timer","set_match_timer_override"):
             fn=getattr(_client(),method,None)
             if callable(fn):
-                await _call(fn(mode,minutes)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nMATCH TIME SET: {minutes} MINUTES ({mode})"); return
+                await _call(fn(mode,minutes)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nMATCH DURATION SET: {minutes} MINUTES ({mode})\nAPPLIES NEXT MATCH OR AFTER MAP RESET"); return
         raise ValueError("CURRENT RCON LIBRARY DOES NOT EXPOSE MATCH TIMER OVERRIDE")
     parts=args.split()
     if cmd in {"!kick","!ban","!unban","!warn","!message","!addvip","!removevip","!tempban","!history"} and not parts: raise ValueError(f"USAGE: {cmd} <player> ...")

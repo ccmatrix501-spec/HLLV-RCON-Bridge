@@ -47,22 +47,59 @@ def _claim(e):
 async def _send(pid,text):
     await _call(_client().message_player(pid,str(text)[:500]))
 
+def _norm_id(v):
+    return re.sub(r"[^a-z0-9]","",str(v or "").strip().casefold())
+
 def _walk_ids(obj):
     found=set()
+    id_keys={"id","player_id","playerid","eos_id","eosid","player_id_64","playerid64","steam_id","steamid","steam_id_64","steamid64","account_id","accountid","platform_id","platformid","user_id","userid"}
     def walk(x):
         if isinstance(x,dict):
             for k,v in x.items():
-                if str(k).lower() in {"id","player_id","playerid","eos_id","eosid"} and v: found.add(str(v))
+                key=str(k).replace("-","_").lower()
+                if key in id_keys and v not in (None,""):
+                    found.add(str(v).strip())
                 walk(v)
-        elif isinstance(x,(list,tuple)): 
+        elif isinstance(x,(list,tuple,set)):
             for v in x: walk(v)
         elif hasattr(x,"model_dump"):
             try: walk(x.model_dump(by_alias=True))
             except Exception: pass
-    walk(_dump(obj)); return found
+        elif hasattr(x,"__dict__"):
+            try: walk(vars(x))
+            except Exception: pass
+    walk(_dump(obj))
+    return {v for v in found if v}
 
-async def _is_admin(pid):
-    try: return pid in _walk_ids(await _call(_client().get_admin_users()))
+def _admin_records(obj):
+    data=_dump(obj)
+    if isinstance(data,dict):
+        for key in ("admins","admin_users","adminUsers","players","users","entries","items","result","data"):
+            value=data.get(key)
+            if isinstance(value,list): return value
+        return [data]
+    return data if isinstance(data,list) else []
+
+def _record_names(record):
+    if not isinstance(record,dict): return set()
+    keys={"name","player_name","playerName","username","display_name","displayName"}
+    return {str(v).strip().casefold() for k,v in record.items() if k in keys and v not in (None,"")}
+
+async def _is_admin(pid,pname=""):
+    try:
+        response=await _call(_client().get_admin_users())
+        target=_norm_id(pid)
+        ids={_norm_id(v) for v in _walk_ids(response)}
+        if target and target in ids: return True
+        # Some HLL:V admin responses identify admins by name rather than the same
+        # player ID exposed by chat logs. Only accept an exact case-insensitive
+        # name match; never use partial/fuzzy matching for permissions.
+        wanted=str(pname or "").strip().casefold()
+        if wanted:
+            for record in _admin_records(response):
+                if wanted in _record_names(record): return True
+        logger.info("Admin permission denied pid=%s name=%s; admin_ids=%s records=%s",pid,pname,len(ids),len(_admin_records(response)))
+        return False
     except Exception as exc:
         logger.warning("Admin permission lookup failed: %s",exc); return False
 
@@ -128,7 +165,7 @@ async def _public(entry,cmd,args):
 
 async def _admin(entry,cmd,args):
     pid=_pid(entry); name=_pname(entry)
-    if not await _is_admin(pid):
+    if not await _is_admin(pid,name):
         await _send(pid,"[ 1ST M.I. ADMIN ]\nACCESS DENIED - ADMIN COMMAND"); return
     if cmd=="!broadcast":
         if not args: raise ValueError("USAGE: !broadcast <message>")

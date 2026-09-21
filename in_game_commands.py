@@ -20,7 +20,7 @@ RULES=os.getenv("HLLV_RULES_TEXT","Use teamwork, follow server rules, and respec
 _task=None; _started=datetime.now(UTC); _cooldowns={}
 
 PUBLIC={"!help","!commands","!discord","!website","!rules","!map","!nextmap","!time","!players","!score","!queue","!admins","!status","!rank","!kills","!deaths","!kd","!revives","!favorite","!top10","!votestatus"}
-ADMIN={"!cancelvote","!startvote","!kick","!ban","!tempban","!unban","!warn","!message","!broadcast","!mapchange","!restartmatch","!addvip","!removevip","!history"}
+ADMIN={"!cancelvote","!startvote","!kick","!ban","!tempban","!unban","!warn","!message","!broadcast","!mapchange","!restartmatch","!addvip","!removevip","!history","!settime","!resettime"}
 
 def _now(): return datetime.now(UTC)
 def _iso(v=None): return (v or _now()).isoformat().replace("+00:00","Z")
@@ -147,6 +147,26 @@ async def _admin(entry,cmd,args):
             fn=getattr(_client(),method,None)
             if callable(fn): await _call(fn()); return
         raise ValueError("CURRENT RCON LIBRARY DOES NOT EXPOSE MATCH RESTART")
+    if cmd in {"!settime","!resettime"}:
+        s=await _session()
+        mode=str(_pick(s,"gameMode","game_mode","mode") or "").strip()
+        if not mode: raise ValueError("CURRENT GAME MODE COULD NOT BE DETECTED")
+        if cmd=="!resettime":
+            for method in ("remove_match_timer","remove_match_timer_override"):
+                fn=getattr(_client(),method,None)
+                if callable(fn):
+                    await _call(fn(mode)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nMATCH TIMER RESET: {mode}"); return
+            raise ValueError("CURRENT RCON LIBRARY DOES NOT EXPOSE MATCH TIMER RESET")
+        token=(args.split()[0] if args else "").lower()
+        m=re.fullmatch(r"(\d+)([mh]?)",token)
+        if not m: raise ValueError("USAGE: !settime <30m|1h|90m>")
+        n=int(m.group(1)); unit=m.group(2) or "m"; minutes=n*60 if unit=="h" else n
+        if minutes < 1: raise ValueError("MATCH TIME MUST BE AT LEAST 1 MINUTE")
+        for method in ("set_match_timer","set_match_timer_override"):
+            fn=getattr(_client(),method,None)
+            if callable(fn):
+                await _call(fn(mode,minutes)); await _send(pid,f"[ 1ST M.I. ADMIN ]\nMATCH TIME SET: {minutes} MINUTES ({mode})"); return
+        raise ValueError("CURRENT RCON LIBRARY DOES NOT EXPOSE MATCH TIMER OVERRIDE")
     parts=args.split()
     if cmd in {"!kick","!ban","!unban","!warn","!message","!addvip","!removevip","!tempban","!history"} and not parts: raise ValueError(f"USAGE: {cmd} <player> ...")
     if cmd=="!history":

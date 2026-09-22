@@ -32,6 +32,32 @@ COMMAND_TIMEOUT = 0.0
 BROADCAST_DIVIDER = "========================"
 DEFAULT_BROADCAST_HEADER = "[ 1ST M.I. SERVER NOTICE ]"
 
+DEFAULT_WELCOME_MESSAGE = os.getenv(
+    "HLLV_WELCOME_MESSAGE",
+    """[ SERVER RULES ]
+
+- Keep teams balanced & even
+- Be respectful of others & The Community
+- when seeding, fight over the middle Objective only to help seed the server
+
+[Bannable Offences]
+- Team Killing
+- Derogatory Terms/slurs
+- Exploiting/Cheating
+- Spamming/self advertising
+
+[Comms/leadership]
+- All commander/team leaders need to have a mic to communicate with the team.
+- No solo locked squads""",
+).replace("\r", "").strip()
+
+async def _apply_default_welcome_message(client: HLLVRcon) -> None:
+    if not DEFAULT_WELCOME_MESSAGE:
+        return
+    await _await_rcon(client.set_welcome_message(DEFAULT_WELCOME_MESSAGE), COMMAND_TIMEOUT)
+    logger.info("Applied HLL:V join welcome/server-rules message.")
+
+
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -238,6 +264,7 @@ async def connect(request: Request) -> dict[str, Any]:
         try:
             await _await_rcon(candidate.connect(), CONNECT_TIMEOUT)
             session = await _await_rcon(candidate.get_server_session(), COMMAND_TIMEOUT)
+            await _apply_default_welcome_message(candidate)
         except Exception:
             candidate.disconnect()
             raise

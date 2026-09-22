@@ -9,7 +9,7 @@ from typing import Any
 from hllrcon import HLLVRcon
 
 from admin_request_api import app
-from app import COMMAND_TIMEOUT, CONNECT_TIMEOUT, _await_rcon, state
+from app import COMMAND_TIMEOUT, CONNECT_TIMEOUT, _apply_default_welcome_message, _await_rcon, state
 
 logger = logging.getLogger("hllv-rcon-bridge.connection-keeper")
 
@@ -78,6 +78,7 @@ async def _connect_once() -> bool:
             await _await_rcon(candidate.connect(), CONNECT_TIMEOUT)
             # Validate that authentication and the command channel are usable.
             await _await_rcon(candidate.get_server_session(), COMMAND_TIMEOUT)
+            await _apply_default_welcome_message(candidate)
         except Exception as exc:
             try:
                 candidate.disconnect()
